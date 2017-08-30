@@ -1,12 +1,11 @@
 import mxnet as mx
 from symbol.rfcn import rfcn
-import numpy as np
 import os
-import random
 import argparse
 import Queue
+import logging
 from multiprocessing import Process, Manager, Value
-from dataset.iterator import DetIter
+from dataset.iterator import DetIter, DetRecordIter
 from dataset.icdar import ICDAR
 from config.config import cfg
 from metric import Metrics
@@ -14,26 +13,6 @@ from metric import Metrics
 WIDTH = 320
 HEIGHT = 320
 NUM_LABEL = 2
-
-def load_icdar(image_set, devkit_path, shuffle=False):
-    """
-    wrapper function for loading icdar dataset
-    
-    Parameters:
-    -------------
-    image_set: str
-        train, trainval...
-    devkit_path: str
-        root directory of dataset
-    shuffle: bool
-        whether to shuffle initial list
-
-    Returns:
-    ----------
-    Imdb
-    """ 
-    Imdb = ICDAR(image_set, devkit_path, shuffle, is_train=True)
-    return Imdb           
 
 def init_conv(ctx, sym, train_iter):
     """
@@ -70,73 +49,72 @@ def init_conv(ctx, sym, train_iter):
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a direct regression multi-oriented neural network')
-    parser.add_argument('--gpus', dest='gpus', default='0, 1, 2, 3', type=str)
-    parser.add_argument('--image-set', dest='image_set', default='icdar2015_train', type=str)
+    parser.add_argument('--gpus', dest='gpus', default='4, 5, 6, 7', type=str)
+    parser.add_argument('--image-set', dest='image_set', default='ICDAR', type=str)
+    parser.add_argument('--year', dest='year', default='2015', type=str)
     parser.add_argument('--val-set', dest='val_set', default='icdar2015_val', type=str)
     parser.add_argument('--data-shape', dest='data_shape', default=320, type=int)
     parser.add_argument('--log', dest='log_file', type=str, default="train_icdar.log")
     parser.add_argument('--devkit-path', dest='devkit_path', type=str, default=os.path.join(os.getcwd(), 'data'))
+    #parser.add_argument('--train-path', dest='train_path', type=str, default=os.path.join(os.getcwd(), 'data', 'ICDAR', 'train.rec'))
+   # parser.add_argument('--val-path', dest='val_path', type=str, default=os.path.join(os.getcwd(), 'data', 'ICDAR', 'val.rec'))
     args = parser.parse_args()
     return args
+
 
 if __name__ == '__main__':
     args = parse_args()
     num_epoch = 2000
-    begin_epoch = 453
+    begin_epoch = 51
     batch_size = 20
-    train_from_scratch = True
-    prefix_out = './model/text-location'
+    train_from_scratch = False
+    prefix_out = './model/text-location-hinge'
 
-    prefetch_thread = 1
+    # context list
+    ctx = [mx.gpu(int(i)) for i in args.gpus.split(',') if i.strip()]
+    #ctx = mx.cpu()
 
-    #context list
-    ctx = [mx.gpu(int(i)) for i in args.gpus.split(',') if i.strip()]  
-    #ctx = [mx.cpu()] if not ctx else ctx
-    #ctx = [mx.cpu()]
-
-    
-    #prepare data
+    # prepare data
     print "start to load data..."
-    imdb_train = load_icdar(args.image_set, args.devkit_path, shuffle=True) 
-    train_iter = DetIter(imdb_train, batch_size, data_shape=args.data_shape, shuffle=cfg.TRAIN.EPOCH_SHUFFLE, is_train=True)
+    #imdb_train = load_icdar(args.image_set, args.devkit_path, shuffle=True) 
+    #train_iter = DetIter(imdb_train, batch_size, data_shape=args.data_shape, shuffle=cfg.TRAIN.EPOCH_SHUFFLE, is_train=True) 
+    train_path = os.path.join(args.devkit_path, args.image_set, 'train.rec')
+    path_imglist = os.path.join(args.devkit_path, args.image_set, 'train.lst')
+    train_iter = DetRecordIter(train_path, batch_size, data_shape=args.data_shape, path_imglist=path_imglist)
 
-    imdb_val = load_icdar(args.val_set, args.devkit_path)
-    val_iter = DetIter(imdb_val, batch_size, data_shape=args.data_shape, is_train=True)
-    val_iter = mx.io.PrefetchingIter(val_iter)
+    #imdb_val = load_icdar(args.val_set, args.devkit_path)
+    #val_iter = DetIter(imdb_val, batch_size, data_shape=args.data_shape, is_train=True)
+    #val_iter = mx.io.PrefetchingIter(val_iter)
+    val_path = os.path.join(args.devkit_path, args.image_set, 'val.rec')
+    path_imglist = os.path.join(args.devkit_path, args.image_set, 'val.lst')
+    val_iter = DetRecordIter(val_path, batch_size, data_shape=args.data_shape, path_imglist=path_imglist)
 
-    resize_epoch = int(cfg.TRAIN.RESIZE_EPOCH)
-    if resize_epoch > 1:
-        batches_per_epoch = ((imdb.num_images - 1) // batch_size + 1) * resize_epoch
-        train_iter = mx.io.ResizeIter(train_iter, batches_per_epoch)
     train_iter = mx.io.PrefetchingIter(train_iter)
 
-
-    #build a NN
+    # build a NN
     print "start to build rfcn..."
     sym = rfcn()
     print "Building NN finished."
-    
 
-    #set up logger
-    import logging
+    # set up logger
     head = "%(asctime)-15s %(message)s"
     log_dir = './log'
-    log_file = 'log_locloss_test.txt'
+    log_file = 'log_lr0.01_test.txt'
     log_file_full_name = os.path.join(log_dir, log_file)
     if not os.path.exists(log_dir):
         os.mkdir(log_dir)
-    logger = logging.getLogger()  
+    logger = logging.getLogger()
     handler = logging.FileHandler(log_file_full_name)
     formatter = logging.Formatter(head)
     handler.setFormatter(formatter)
     logger.addHandler(handler)
     logger.setLevel(logging.DEBUG)
 
-    #init optimizer params
+    # init optimizer params
     optimizer_params = {'momentum': 0.9,
-                            'wd': 4e-4,
-                            'learning_rate': 0.0001,
-                            'rescale_grad': 1.0/20/6400}
+                        'wd': 4e-4,
+                        'learning_rate': 0.0001,
+                        'rescale_grad': 1.0}
     logging.basicConfig(level=logging.DEBUG, format=head)
 
     if train_from_scratch:
@@ -144,13 +122,13 @@ if __name__ == '__main__':
         print arg_names
         arg_params, aux_params = init_conv(ctx, sym, train_iter)
         begin_epoch = 0
-    else: 
+    else:
         _, arg_params, aux_params = mx.model.load_checkpoint(prefix_out, begin_epoch)
     
     #init training module
-    model = mx.mod.Module(sym, label_names=['label','loc_target'], logger=logger, context=ctx)
+    model = mx.mod.Module(sym, label_names=("label", ), logger=logger, context=ctx)
 
-    model.fit(train_iter, 
+    model.fit(train_iter,
               eval_data=val_iter,
               arg_params=arg_params,
               aux_params=aux_params,

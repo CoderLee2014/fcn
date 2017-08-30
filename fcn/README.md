@@ -1,2 +1,0 @@
-# fcn
-Fully Convolutional Networks

@@ -1,5 +1,6 @@
 import mxnet as mx
 import negativemining
+import hinge_loss
 from config import config
 from nms import nms
 
@@ -38,7 +39,6 @@ def ConvUnit(data, kernel, num_filter,name, pad=(1, 1)):
 def rfcn(mode="train"):
     data = mx.sym.Variable('data')
     label = mx.symbol.Variable(name="label")
-    loc_target = mx.symbol.Variable(name="loc_target")
     
     conv1 = ConvUnit(data, kernel=(5, 5), num_filter=32, name='conv1')
     pool1 = mx.symbol.Pooling(
@@ -104,24 +104,29 @@ def rfcn(mode="train"):
     conv_reg = mx.symbol.Convolution(data=conv_reg, kernel=(1, 1), num_filter=8, name='reg_conv2')
 
 
+    bbox_pred = mx.symbol.sigmoid(data=conv_reg, name='bbox_pred')
+    bbox_pred = 80 * bbox_pred - 40
+
+    # negative mining 
+    dets = mx.symbol.Custom(cls_prob=cls_conv, label=label,
+                        op_type='negativemining', name='negativemining')
+    cls_keep =  mx.sym.stop_gradient(dets[0])
+    bbox_keep = dets[1]
+    loc_target = dets[2]
+    cls_target = dets[3]
+
     if mode == "test":
         group = mx.symbol.Group([cls_conv, conv_reg])
     else:
+        cls_loss = mx.symbol.Custom(cls_pred=cls_conv, mask=cls_keep, label=cls_target, op_type="hingeloss", name="hingeloss")
 
-        #bbox_pred = mx.symbol.sigmoid(data=conv_reg, name='bbox_pred')
-        #bbox_pred = 800 * bbox_pred - 400
-        dets = mx.symbol.Custom(cls_prob=cls_conv, bbox_pred=conv_reg, label=label, bbox_target=loc_target,
-                            op_type='negativemining', name='negativemining')
-        cls_pred = dets[0]
-        loc_pred = dets[1]
-        cls_keep = dets[2]
-        bbox_keep = dets[3]
-
-        loc_loss_ = mx.symbol.smooth_l1(data=(loc_pred * bbox_keep - loc_target), scalar=1., name="loc_loss_")
+        loc_loss_ = mx.symbol.smooth_l1(data=(bbox_pred * bbox_keep - loc_target), scalar=1., name="loc_loss_")
         loc_loss = mx.symbol.MakeLoss(data=loc_loss_, name="loc_loss", grad_scale=0.01, normalization="valid")
 
-        group = mx.symbol.Group([cls_pred, loc_pred, cls_keep, bbox_keep, loc_loss])
-    #group = mx.symbol.Group([cls_prob, loc_loss])
+        # monitoring training status
+        cls_prob = mx.sym.MakeLoss(data=cls_conv, grad_scale=0, name="cls_preds")
+
+        group = mx.symbol.Group([cls_prob, cls_keep, loc_loss, cls_loss])
     
     return group
 

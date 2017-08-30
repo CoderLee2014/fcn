@@ -4,6 +4,7 @@ import numpy as np
 from imdb import Imdb
 import cv2
 import re
+import cPickle as pkl
 
 
 class ICDAR(Imdb):
@@ -23,25 +24,24 @@ class ICDAR(Imdb):
     is_train : boolean
         if true, will load annotations
     """
-    def __init__(self, image_set, devkit_path, shuffle=False, is_train=False):
+    def __init__(self, image_set, year, devkit_path, shuffle=False, is_train=False):
         super(ICDAR, self).__init__('ICDAR_' + image_set)
         self.image_set = image_set
         self.devkit_path = devkit_path
         self.data_path = os.path.join(devkit_path, 'ICDAR')
+        self.cache_path = os.path.join(self.data_path, self.image_set + '_GT', 'labels.pkl')
         self.extension = '.jpg'
         self.is_train = is_train
 
         self.classes = ['text', ]
 
-        self.config = {#'use_difficult': True,
-                       'comp_id': 'comp4',
+        self.config = {'comp_id': 'comp4',
                        'padding': 157}
         self.num_classes = len(self.classes)
         self.image_set_index = self._load_image_set_index(shuffle)
         self.num_images = len(self.image_set_index)
         if is_train:
-            self.labels, self.loc_targets = self._load_image_labels()
-
+            self.labels = self._load_image_labels()
 
     def _load_image_set_index(self, shuffle):
         """
@@ -61,8 +61,8 @@ class ICDAR(Imdb):
             image_set_index = [x.strip() for x in f.readlines()]
         if shuffle:
             np.random.shuffle(image_set_index)
-        return image_set_index
-    
+        return image_set_index[:10]
+
     def image_path_from_index(self, index):
         """
         given image index, find out full path
@@ -80,7 +80,6 @@ class ICDAR(Imdb):
         image_file = os.path.join(self.data_path, self.image_set, name + self.extension)
         assert os.path.exists(image_file), 'Path does not exist: {}'.format(image_file)
         return image_file
-    
 
     def _image_path_from_index(self, index):
         """
@@ -112,7 +111,8 @@ class ICDAR(Imdb):
         ground-truths of this image
         """
         assert self.labels is not None, "Labels not processed"
-        return self.labels[index], self.loc_targets[index] 
+        return self.labels[index] 
+
     def _label_path_from_index(self, index):
         """
         given image index, find out annotation path
@@ -136,11 +136,14 @@ class ICDAR(Imdb):
 
         Returns:
         ----------
-        labels packed in [num_images x max_num_objects x 9] tensor
+        labels packed in [num_images x samples_in_each_image x 9] tensor
+
         """
         labels = []
-        loc_targets = []
         # load ground-truth from xml annotations
+        if os.path.exists(self.cache_path):
+            cache =  pkl.load(open(self.cache_path, 'rb'))  
+            return cache
         for idx in self.image_set_index:
             #image_file = self._image_path_from_index(idx)
             #height, width, channels = cv2.imread(image_file).shape
@@ -148,57 +151,52 @@ class ICDAR(Imdb):
             gt_boxes = []
             for line in open(label_file):
                 line = line.decode('utf-8-sig').encode('utf-8').strip().split(',')
-                cls_id = self.classes.index('text')
                 box = []
                 for i in range(8):
                     if i % 2 == 0:
                         box.append(float(line[i])/4.0)
-                    else: 
+                    else:
                         box.append(float(line[i])/(720.0/320))
-                #box = [int(elem) for elem in line[:8]]
+                # box = [int(elem) for elem in line[:8]]
                 gt_boxes.append(np.array(box)/4.0)
-            label, loc_target = self.labeling(80, 80, gt_boxes, idx)
+            label = self.labeling(80, 80, gt_boxes, idx)
             labels.append(label)
-            loc_targets.append(loc_target)
-        
-        return np.array(labels), np.array(loc_targets)
+        labels = np.array(labels)
+        pkl.dump(labels, open(self.cache_path, 'wb'))
+        return labels
 
     def labeling(self, width, height, gt_boxes, index):
-        label = np.zeros((height, width, 1)) 
+        label = np.zeros((height, width, 9)) 
         #img = np.ones((height, width, 3))*255
-        loc_target = np.zeros((height, width, 8))
+        #loc_target = np.zeros((height, width, 8))
         for y in range(height):
             for x in range(width):
                 for box in gt_boxes:
                     if self.isInsideGT((x,y), box):
-                        label[y, x, :] = 1
+                        label[y, x, 0] = 1
                         #img[y,x,:] = 0
-                        loc_target[y, x, :] = [box[0] - x, box[1] - y,
+                        label[y, x, 1:] = [box[0] - x, box[1] - y,
                                               box[2] - x, box[3] - y,
                                               box[4] - x, box[5] - y,
                                               box[6] - x, box[7] - y]
         #cv2.imwrite(index+'.jpg',img)
-        return label, loc_target
+        return label
 
-                      
-    def isInsideGT(self, (x,y), box):
+    def isInsideGT(self, (x, y), box):
         res = False
         i = -1
-        l = 4 # 4points
+        l = 4
         j = l - 1
         minx = box[::2].min()
         maxx = box[::2].max()
         miny = box[1::2].min()
         maxy = box[1::2].max()
-        if x < minx or x >maxx or y < miny or y > maxy:
+        if x < minx or x > maxx or y < miny or y > maxy:
             return False
         while i < l - 1:
             i += 1
-            if ((box[2*i]<=x and x<box[2*j]) or (box[2*j]<=x and x<box[2*i])):
-                if (y<(box[2*j+1]-box[2*i+1])*(x-box[2*i])/(box[2*j]-box[2*i])+box[2*i+1]):
+            if ((box[2*i] <= x and x < box[2*j]) or (box[2*j] <= x and x < box[2*i])):
+                if (y < (box[2*j+1]-box[2*i+1]) * (x-box[2*i]) / (box[2*j]-box[2*i]) + box[2*i+1]):
                     res = not res
             j = i
         return res
-
-        
-        
